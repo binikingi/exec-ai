@@ -86,7 +86,7 @@ call_claude_api() {
     local shell=$2
     local api_key=$3
 
-    local system_prompt="You are a helpful command line assistant. The user is using $shell shell. Generate ONLY the exact command needed to accomplish the task. Do not include explanations, markdown formatting, or code blocks. Output only the raw command that can be executed directly. Be precise and safe. make sure that if the user wants to do somehting to that requires more than 1 command to return a 1-liner using && or ; to chain commands."
+    local system_prompt="You are a helpful command line assistant. The user is using $shell shell. Generate ONLY the exact command needed to accomplish the task. Do not include explanations, markdown formatting, or code blocks. Output only the raw command that can be executed directly. Be precise and safe. make sure that if the user wants to do somehting to that requires more than 1 command to return a 1-liner using && or ; to chain commands. your output should be a single line command that can be run directly in the terminal."
 
     local response=$(curl -s https://api.anthropic.com/v1/messages \
         -H "content-type: application/json" \
