@@ -1,0 +1,18 @@
+# Configuration and secrets
+config
+*.key
+
+# Logs and history
+history
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
