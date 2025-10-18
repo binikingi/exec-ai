@@ -1,5 +1,9 @@
 # AI Command Line Assistant
 
+<p align="center">
+  <img src="exec-ai.gif" alt="exec-ai demo" width="800">
+</p>
+
 A bash/zsh/fish-compatible tool that uses AI (Claude) to help you write and execute shell commands naturally.
 
 ## Features
