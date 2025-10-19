@@ -5,7 +5,7 @@
 
 set -e
 
-VERSION="1.0.0"
+VERSION="1.0.1"
 SCRIPT_NAME="exec-ai"
 
 # Colors for output
@@ -80,13 +80,65 @@ set_api_key() {
     print_color "$GREEN" "API key saved to $CONFIG_FILE"
 }
 
+# Function to gather system context
+gather_system_context() {
+    local os_type=$(uname -s)
+    local os_version=$(uname -r)
+    local architecture=$(uname -m)
+    local current_dir=$(pwd)
+    local user=$(whoami)
+
+    # Check for common tools
+    local has_docker=""
+    local has_git=""
+    local has_python=""
+    local has_node=""
+
+    command -v docker &> /dev/null && has_docker="yes"
+    command -v git &> /dev/null && has_git="yes"
+    command -v python3 &> /dev/null && has_python="yes"
+    command -v node &> /dev/null && has_node="yes"
+
+    # Build context string
+    local context="System: $os_type $os_version ($architecture)"
+    context="$context\nCurrent directory: $current_dir"
+    context="$context\nUser: $user"
+
+    if [ -n "$has_docker" ]; then
+        context="$context\nDocker: available"
+    fi
+    if [ -n "$has_git" ]; then
+        context="$context\nGit: available"
+    fi
+    if [ -n "$has_python" ]; then
+        local py_version=$(python3 --version 2>&1 | cut -d' ' -f2)
+        context="$context\nPython: $py_version"
+    fi
+    if [ -n "$has_node" ]; then
+        local node_version=$(node --version 2>&1)
+        context="$context\nNode.js: $node_version"
+    fi
+
+    echo "$context"
+}
+
 # Function to call Claude API
 call_claude_api() {
     local prompt=$1
     local shell=$2
     local api_key=$3
+    local error_context=${4:-""}
 
-    local system_prompt="You are a helpful command line assistant. The user is using $shell shell. Generate ONLY the exact command needed to accomplish the task. Do not include explanations, markdown formatting, or code blocks. Output only the raw command that can be executed directly. Be precise and safe. make sure that if the user wants to do somehting to that requires more than 1 command to return a 1-liner using && or ; to chain commands. your output should be a single line command that can be run directly in the terminal."
+    # Gather system context
+    local sys_context=$(gather_system_context)
+
+    local system_prompt="You are a helpful command line assistant. The user is using $shell shell. Generate ONLY the exact command needed to accomplish the task. Do not include explanations, markdown formatting, or code blocks. Output only the raw command that can be executed directly. Be precise and safe. make sure that if the user wants to do somehting to that requires more than 1 command to return a 1-liner using && or ; to chain commands. your output should be a single line command that can be run directly in the terminal.\n\nSystem Context:\n$sys_context"
+
+    # Build user message with optional error context
+    local user_message="$prompt"
+    if [ -n "$error_context" ]; then
+        user_message="$user_message\n\nPrevious attempt failed with:\n$error_context\n\nPlease provide a corrected command."
+    fi
 
     local response=$(curl -s https://api.anthropic.com/v1/messages \
         -H "content-type: application/json" \
@@ -98,7 +150,7 @@ call_claude_api() {
             \"system\": \"$system_prompt\",
             \"messages\": [{
                 \"role\": \"user\",
-                \"content\": \"$prompt\"
+                \"content\": \"$user_message\"
             }]
         }")
 
@@ -110,6 +162,9 @@ call_claude_api() {
 execute_with_approval() {
     local command=$1
     local auto_approve=${2:-false}
+    local query=${3:-""}
+    local shell=${4:-"bash"}
+    local api_key=${5:-""}
 
     # Show the proposed command
     print_color "$CYAN" "\nI want to run this command:"
@@ -139,15 +194,69 @@ execute_with_approval() {
             # Save to history
             echo "$(date '+%Y-%m-%d %H:%M:%S') | $command" >> "$HISTORY_FILE"
 
-            # Execute the command
-            eval "$command"
+            # Capture both stdout and stderr
+            local temp_output=$(mktemp)
+            local temp_error=$(mktemp)
+
+            # Execute the command (disable set -e temporarily to capture exit code)
+            set +e
+            eval "$command" > "$temp_output" 2> "$temp_error"
             local exit_code=$?
+            set -e
+
+            # Display output
+            cat "$temp_output"
+            cat "$temp_error" >&2
 
             echo ""
             if [ $exit_code -eq 0 ]; then
                 print_color "$GREEN" "Command completed successfully."
+                rm "$temp_output" "$temp_error"
             else
                 print_color "$RED" "Command failed with exit code: $exit_code"
+
+                # Offer to retry with AI help
+                if [ -n "$query" ] && [ -n "$api_key" ]; then
+                    echo ""
+                    echo -n "Do you want to send the error to AI and try a corrected command? [Y]es/[n]o: "
+                    read -r retry_approval
+
+                    retry_approval=$(echo "$retry_approval" | tr '[:upper:]' '[:lower:]')
+
+                    if [ "$retry_approval" = "y" ] || [ "$retry_approval" = "yes" ] || [ -z "$retry_approval" ]; then
+                        # Build error context
+                        local error_output=$(cat "$temp_error")
+                        local error_context="Command: $command\nExit code: $exit_code\nError output:\n$error_output"
+
+                        print_color "$CYAN" "\nAsking AI for a corrected command..."
+
+                        # Call Claude API with error context
+                        local temp_file=$(mktemp)
+                        (call_claude_api "$query" "$shell" "$api_key" "$error_context" > "$temp_file") &
+                        local api_pid=$!
+
+                        # Show loading animation
+                        show_loading $api_pid
+                        wait $api_pid
+
+                        # Get the corrected command
+                        local corrected_command=$(cat "$temp_file")
+                        rm "$temp_file"
+
+                        # Check if we got a valid response
+                        if [ -n "$corrected_command" ]; then
+                            # Recursively call execute_with_approval with the corrected command
+                            execute_with_approval "$corrected_command" false "$query" "$shell" "$api_key"
+                            local retry_exit_code=$?
+                            rm "$temp_output" "$temp_error"
+                            return $retry_exit_code
+                        else
+                            print_color "$RED" "Failed to get corrected command from AI."
+                        fi
+                    fi
+                fi
+
+                rm "$temp_output" "$temp_error"
             fi
 
             return $exit_code
@@ -267,7 +376,7 @@ main() {
     fi
 
     # Execute with approval
-    execute_with_approval "$command" "$auto_approve"
+    execute_with_approval "$command" "$auto_approve" "$query" "$shell" "$api_key"
 }
 
 # Run main function
